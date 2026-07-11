@@ -98,16 +98,22 @@ async def handle_webhook(request):
 
 async def main():
     app = web.Application()
-    app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
-    SimpleRequestHandler(dispatcher=dp, bot=bot)
+
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
+
     setup_application(app, dp)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+
     logging.info(f"Bot started on port {PORT}")
     await asyncio.Future()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
