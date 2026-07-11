@@ -100,13 +100,13 @@ async def main():
     app = web.Application()
     app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
     SimpleRequestHandler(dispatcher=dp, bot=bot)
-    setup_application(app, bot, dp)
+    setup_application(app, dp)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logging.info(f"Bot started on port {PORT}")
-    await asyncio.Event().wait()
+    await asyncio.Future()
 
 if __name__ == "__main__":
     import asyncio
