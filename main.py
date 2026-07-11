@@ -1,4 +1,4 @@
-python
+
 import os
 import json
 import logging
@@ -91,6 +91,11 @@ async def echo(msg: Message):
     reply = await hf_chat(uid, msg.text)
     await msg.answer(reply)
 
+async def handle_webhook(request):
+    update = types.Update(**(await request.json()))
+    await dp.feed_update(bot, update)
+    return web.Response(status=200)
+
 async def main():
     app = web.Application()
     app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
@@ -101,13 +106,8 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logging.info(f"Bot started on port {PORT}")
-    await web.EventLoop().create_future()
+    await asyncio.Event().wait()
 
-async def handle_webhook(request):
-    update = types.Update(**(await request.json()))
-    await dp.feed_update(bot, update)
-    return web.Response(status=200)
-
-if name == "main":
+if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
