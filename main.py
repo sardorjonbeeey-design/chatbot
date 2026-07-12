@@ -205,7 +205,6 @@ def build_messages(history: list, user_text: str) -> list:
     return messages
 
 
-LIMIT_MESSAGE = "Bugungi xabar limitiga yetding. Do'stlaringni /invite orqali taklif qil — har biri uchun +5 bonus xabar olasan 🎁"
 ERROR_MESSAGE = "Hozir biroz band bo'lib qoldim, birpasdan keyin qayta yoz 🙏"
 STATUS_STAGES = [
     (0, "✍️ Javob yozyapman"),      # 0-5s: normal response time
@@ -227,19 +226,42 @@ async def cmd_start(message: Message):
         if referrer_id != user_id:
             await credit_referral(referrer_id, user_id)
 
-    await message.answer("Salom! Men Qadam. Nima haqida gaplashamiz?")
+    await message.answer(
+        "Salom! Men Qadam. Nima haqida gaplashamiz?\n\n"
+        "ℹ️ Buyruqlarni bilish uchun /help yoz."
+    )
+
+
+async def get_invite_link_and_stats(user_id: int):
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={user_id}"
+    count_raw = await redis_cmd("GET", f"referral_count:{user_id}")
+    count = int(count_raw) if count_raw else 0
+    bonus_raw = await redis_cmd("GET", f"bonus:{user_id}")
+    bonus = int(bonus_raw) if bonus_raw else 0
+    return link, count, bonus
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    await message.answer(
+        "🤖 <b>Qadam — sizning AI do'stingiz</b>\n\n"
+        "Menga istalgan narsa haqida yoz — savol ber, maslahat so'ra, "
+        "yoki shunchaki suhbatlash. O'zbek va boshqa tillarda gaplasha olaman.\n\n"
+        "<b>Buyruqlar:</b>\n"
+        "/start — botni qayta ishga tushirish\n"
+        "/invite — do'stlaringni taklif qilib bonus xabar ol\n"
+        "/help — shu yordam xabari\n\n"
+        "Har kuni bepul xabar limiti bor. Limit tugasa, do'stlaringni taklif qil — "
+        "har biri uchun +5 bonus xabar olasan 🎁",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("invite"))
 async def cmd_invite(message: Message):
     user_id = message.from_user.id
-    bot_info = await bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start={user_id}"
-
-    count_raw = await redis_cmd("GET", f"referral_count:{user_id}")
-    count = int(count_raw) if count_raw else 0
-    bonus_raw = await redis_cmd("GET", f"bonus:{user_id}")
-    bonus = int(bonus_raw) if bonus_raw else 0
+    link, count, bonus = await get_invite_link_and_stats(user_id)
 
     text = (
         f"🔗 Sizning taklif havolangiz:\n{link}\n\n"
