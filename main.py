@@ -389,16 +389,15 @@ async def cmd_voice(message: Message):
     # Case 2: only /voice
     else:
         last_reply = await redis_cmd(
-    "GET",
-    f"last_reply:{user_id}"
-)
+            "GET",
+            f"last_reply:{user_id}"
+        )
 
-if not last_reply:
-    await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
-    return
+        if not last_reply:
+            await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
+            return
 
-text_to_voice = last_reply
-
+        text_to_voice = last_reply
 
     try:
         tts_file = tempfile.NamedTemporaryFile(
@@ -422,7 +421,6 @@ text_to_voice = last_reply
     except Exception as e:
         log.error(f"Voice command error: {e}")
         await message.answer("🎙️ Ovoz yaratishda xatolik bo'ldi.")
-        
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
