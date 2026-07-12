@@ -207,7 +207,10 @@ async def backup_to_channel(message: Message):
 async def track_user(message: Message):
     """Registers this user so admin commands can list/inspect them later."""
     user = message.from_user
-    await redis_cmd("SADD", "known_users", user.id)
+    result = await redis_cmd("SADD", "known_users", user.id)
+    if result is None:
+        log.error(f"track_user: failed to SADD known_users for {user.id} (Redis unavailable?)")
+        return
     info = f"{user.full_name}|{user.username or ''}"
     await redis_cmd("SET", f"user_info:{user.id}", info)
 
@@ -235,7 +238,7 @@ STATUS_STAGES = [
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-    asyncio.create_task(track_user(message))
+    await track_user(message)
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else None
 
@@ -308,7 +311,8 @@ async def cmd_admin(message: Message):
         "/users — barcha foydalanuvchilar ro'yxati\n"
         "/usage <user_id> — foydalanuvchi limiti va statistikasi\n"
         "/history <user_id> — foydalanuvchi suhbat tarixi\n"
-        "/setbonus <user_id> <son> — bonus xabarlarni qo'lda o'rnatish"
+        "/setbonus <user_id> <son> — bonus xabarlarni qo'lda o'rnatish\n"
+        "/redistest — Redis ulanishini tekshirish"
     )
 
 
@@ -388,6 +392,39 @@ async def cmd_setbonus(message: Message):
     await message.answer(f"✅ {target_id} uchun bonus {amount} ga o'rnatildi.")
 
 
+@dp.message(Command("redistest"))
+async def cmd_redistest(message: Message):
+    if not is_admin(message):
+        return
+
+    lines = []
+    lines.append(f"UPSTASH_REDIS_REST_URL set: {'✅' if UPSTASH_URL else '❌ MISSING'}")
+    lines.append(f"UPSTASH_REDIS_REST_TOKEN set: {'✅' if UPSTASH_TOKEN else '❌ MISSING'}")
+
+    if not UPSTASH_URL or not UPSTASH_TOKEN:
+        lines.append("\n⚠️ One or both env vars are missing on Render. Set them in "
+                      "Render → your service → Environment, then redeploy.")
+        await message.answer("\n".join(lines))
+        return
+
+    test_key = "redistest:ping"
+    test_value = str(int(time.time()))
+
+    set_result = await redis_cmd("SET", test_key, test_value)
+    lines.append(f"SET test: {'✅ ' + str(set_result) if set_result is not None else '❌ FAILED'}")
+
+    get_result = await redis_cmd("GET", test_key)
+    lines.append(f"GET test: {'✅ ' + str(get_result) if get_result is not None else '❌ FAILED'}")
+
+    if get_result == test_value:
+        lines.append("\n✅ Redis is working correctly end-to-end.")
+    else:
+        lines.append("\n❌ Redis round-trip failed — check that the URL/token are correct "
+                      "and that the Upstash database is active (not paused/deleted).")
+
+    await message.answer("\n".join(lines))
+
+
 @dp.message(Command("voice"))
 async def cmd_voice(message: Message):
     user_id = message.from_user.id
@@ -421,6 +458,8 @@ async def cmd_voice(message: Message):
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
+
+    await track_user(message)
 
     voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
 
@@ -512,7 +551,7 @@ async def handle_message(message: Message):
     if not user_text.strip():
         return
 
-    asyncio.create_task(track_user(message))
+    await track_user(message)
 
     if user_id not in ADMIN_IDS:
         if not await check_and_increment_limit(user_id):
