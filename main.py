@@ -16,12 +16,19 @@ log = logging.getLogger("qadam")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+# Gemini (used ONLY for voice messages)
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 BACKUP_CHANNEL_ID = os.getenv("BACKUP_CHANNEL_ID")  # e.g. -1001234567890, optional
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()}
 PORT = int(os.getenv("PORT", 10000))
+# Daily limits
+
 DAILY_LIMIT = 30
+
+VOICE_DAILY_LIMIT = int(os.getenv("VOICE_DAILY_LIMIT", 5))
 BONUS_PER_REFERRAL = 5  # extra daily messages granted to the referrer per successful invite
 MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 
