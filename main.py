@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import time
 from datetime import date
 from collections import defaultdict, deque
 
@@ -78,6 +79,12 @@ def build_messages(user_id: int, user_text: str) -> list:
 
 LIMIT_MESSAGE = "Bugungi 30 ta xabar limitiga yetding. Ertaga davom etamiz 🙂"
 ERROR_MESSAGE = "Hozir biroz band bo'lib qoldim, birpasdan keyin qayta yoz 🙏"
+STATUS_STAGES = [
+    (0, "✍️ Javob yozyapman"),      # 0-5s: normal response time
+    (5, "🤔 O'ylayapman"),          # 5-15s: model is taking longer, "thinking"
+    (15, "⏳ Navbatda kutyapman"),   # 15-30s: likely queued on the provider side
+    (30, "💭 Sabr qiling, tugayapti"),  # 30s+: reassurance for the rare long wait
+]
 
 
 @dp.message(Command("start"))
@@ -99,6 +106,35 @@ async def handle_message(message: Message):
 
     messages = build_messages(user_id, user_text)
 
+    status_msg = await message.answer(f"{STATUS_STAGES[0][1]}. (0s)")
+    stop_event = asyncio.Event()
+
+    def stage_for(elapsed: int) -> str:
+        current = STATUS_STAGES[0][1]
+        for threshold, label in STATUS_STAGES:
+            if elapsed >= threshold:
+                current = label
+        return current
+
+    async def animate_status():
+        start = time.monotonic()
+        dot_count = 0
+        while not stop_event.is_set():
+            elapsed = int(time.monotonic() - start)
+            stage = stage_for(elapsed)
+            dots = "." * ((dot_count % 3) + 1)
+            try:
+                await status_msg.edit_text(f"{stage}{dots} ({elapsed}s)")
+            except Exception:
+                pass  # ignore "message not modified" / rate-limit hiccups
+            dot_count += 1
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=1.2)
+            except asyncio.TimeoutError:
+                pass
+
+    status_task = asyncio.create_task(animate_status())
+
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.post(
@@ -107,7 +143,8 @@ async def handle_message(message: Message):
                 json={
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
-                    "max_tokens": 500,
+                    "max_tokens": 300,
+                    "thinking": {"type": "disabled"},
                 },
             ) as resp:
                 if resp.status == 200:
@@ -128,11 +165,19 @@ async def handle_message(message: Message):
     except (KeyError, IndexError, ValueError) as e:
         log.error(f"Unexpected DeepSeek response format: {e}")
         reply = ERROR_MESSAGE
+    finally:
+        stop_event.set()
+        await status_task
 
     # save turn to memory only on success-ish replies
     history = user_memory[user_id]
     history.append(("user", user_text))
     history.append(("assistant", reply))
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
     try:
         await message.answer(reply, parse_mode="HTML")
