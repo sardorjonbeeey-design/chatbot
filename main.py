@@ -618,27 +618,27 @@ async def handle_message(message: Message):
     except Exception:
         pass
 
-   try:
-    await message.answer(reply, parse_mode="HTML")
+       try:
+        await message.answer(reply, parse_mode="HTML")
 
-    # Save last bot reply for /voice command
-    await redis_cmd(
-        "SET",
-        f"last_reply:{user_id}",
-        reply
-    )
+        # Save last bot reply for /voice command
+        await redis_cmd(
+            "SET",
+            f"last_reply:{user_id}",
+            reply
+        )
 
-except Exception as e:
-    log.error(f"Failed to send with HTML parse_mode, retrying plain: {e}")
+    except Exception as e:
+        log.error(f"Failed to send with HTML parse_mode, retrying plain: {e}")
 
-    await message.answer(reply)
+        await message.answer(reply)
 
-    # Save even if HTML failed
-    await redis_cmd(
-        "SET",
-        f"last_reply:{user_id}",
-        reply
-    )
+        # Save even if HTML failed
+        await redis_cmd(
+            "SET",
+            f"last_reply:{user_id}",
+            reply
+        )
 
 
 # ---- health check / webhook server ----
