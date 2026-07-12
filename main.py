@@ -268,15 +268,16 @@ async def get_invite_link_and_stats(user_id: int):
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "🤖 <b>Qadam — sizning AI do'stingiz</b>\n\n"
-        "Menga istalgan narsa haqida yoz — savol ber, maslahat so'ra, "
-        "yoki shunchaki suhbatlash. O'zbek va boshqa tillarda gaplasha olaman.\n\n"
-        "<b>Buyruqlar:</b>\n"
-        "/start — botni qayta ishga tushirish\n"
-        "/invite — do'stlaringni taklif qilib bonus xabar ol\n"
-        "/help — shu yordam xabari\n\n"
-        "Har kuni bepul xabar limiti bor. Limit tugasa, do'stlaringni taklif qil — "
-        "har biri uchun +5 bonus xabar olasan 🎁",
+        "<b>QADAM</b>\n"
+        "<i>Sun'iy intellekt hamrohingiz</i>\n\n"
+        "Matn yoz, ovozli xabar yubor yoki rasm tashla — qolganini men bajaraman.\n\n"
+        "○ <b>Matn</b> — istalgan mavzuda suhbat\n"
+        "○ <b>Ovoz</b> — tinglayman, javob beraman\n"
+        "○ <b>Rasm</b> — ko'raman, tushuntiraman\n\n"
+        "· · ·\n\n"
+        "/invite — do'st taklif qil, +5 bonus xabar ol\n"
+        "/voice — oxirgi javobni ovozga aylantir\n\n"
+        "Kunlik bepul limit mavjud. Tugasa — /invite orqali kengaytiring.",
         parse_mode="HTML",
     )
 
@@ -479,9 +480,7 @@ async def handle_voice(message: Message):
     user_id = message.from_user.id
 
     await track_user(message)
-
-    if user_id not in ADMIN_IDS:
-        asyncio.create_task(backup_to_channel(message))
+    asyncio.create_task(backup_to_channel(message))
 
     voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
 
@@ -561,6 +560,82 @@ Keep it short and friendly.
         log.error(f"Voice error: {e}", exc_info=True)
         try:
             await status.edit_text("🎙️ Ovozni qayta ishlashda xatolik bo'ldi.")
+        except Exception:
+            pass
+
+
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    user_id = message.from_user.id
+
+    await track_user(message)
+    asyncio.create_task(backup_to_channel(message))
+
+    if user_id not in ADMIN_IDS:
+        if not await check_and_increment_limit(user_id):
+            await message.answer(LIMIT_MESSAGE)
+            return
+
+    status = await message.answer("🖼️ Rasmni ko'ryapman...")
+
+    try:
+        # Telegram sends several resolutions of the same photo — take the largest
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as img:
+            await bot.download_file(file.file_path, img.name)
+            img_path = img.name
+
+        with open(img_path, "rb") as f:
+            image_bytes = f.read()
+
+        os.remove(img_path)
+
+        caption = (message.caption or "").strip()
+        user_note = caption if caption else "(rasmga izoh yozilmagan)"
+
+        image_instructions = SYSTEM_PROMPT + f"""
+
+Look at this image. The user's caption/message alongside it was: "{user_note}"
+Reply naturally as Qadam, IN TEXT, in the same language as the user's caption
+(or Uzbek if there's no caption). Keep it short and friendly.
+"""
+
+        # generate_content is a BLOCKING call in this SDK — run it in a thread.
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=[
+                image_instructions,
+                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            ],
+        )
+
+        reply = (response.text or "").strip()
+        if not reply:
+            raise ValueError("Empty response from Gemini")
+
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+        try:
+            await message.answer(reply, parse_mode="HTML")
+        except Exception:
+            await message.answer(reply)
+
+        await redis_cmd("SET", f"last_reply:{user_id}", reply)
+
+        memory_note = f"[rasm] {caption}" if caption else "[rasm]"
+        await append_memory(user_id, "user", memory_note)
+        await append_memory(user_id, "assistant", reply)
+
+    except Exception as e:
+        log.error(f"Photo error: {e}", exc_info=True)
+        try:
+            await status.edit_text("🖼️ Rasmni qayta ishlashda xatolik bo'ldi.")
         except Exception:
             pass
 
