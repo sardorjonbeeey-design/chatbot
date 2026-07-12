@@ -618,7 +618,7 @@ async def handle_message(message: Message):
     except Exception:
         pass
 
-       try:
+    try:
         await message.answer(reply, parse_mode="HTML")
 
         # Save last bot reply for /voice command
