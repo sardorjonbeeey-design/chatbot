@@ -427,15 +427,15 @@ async def handle_voice(message: Message):
 
     voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
 
-    count = await redis_cmd("INCR", voice_key)
+        count = await redis_cmd("INCR", voice_key)
 
-if count is None:
-    count = 1  # Redis unavailable, allow voice
+    if count is None:
+        count = 1  # Redis unavailable, allow voice
 
-if int(count) == 1:
-    await redis_cmd("EXPIRE", voice_key, 172800)
+    if int(count) == 1:
+        await redis_cmd("EXPIRE", voice_key, 172800)
 
-if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
+    if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
         await message.answer(
             "🎙️ Bugungi ovozli xabar limiti tugadi.\n"
             "Ertaga yana foydalanishingiz mumkin."
@@ -443,6 +443,7 @@ if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
         return
 
     status = await message.answer("🎧 Ovozni tinglayapman...")
+
 
     try:
         # Download Telegram voice
