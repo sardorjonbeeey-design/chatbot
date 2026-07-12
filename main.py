@@ -38,7 +38,7 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 API_URL = "https://api.poyo.ai/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -377,7 +377,101 @@ async def cmd_setbonus(message: Message):
     await message.answer(f"✅ {target_id} uchun bonus {amount} ga o'rnatildi.")
 
 @dp.message(F.voice)
-async def handle_voice(...)
+async def handle_voice(message: Message):
+    user_id = message.from_user.id
+
+    voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
+
+    count = await redis_cmd("INCR", voice_key)
+
+    if count == 1:
+        await redis_cmd("EXPIRE", voice_key, 172800)
+
+    if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
+        await message.answer(
+            "🎙️ Bugungi ovozli xabar limiti tugadi.\n"
+            "Ertaga yana foydalanishingiz mumkin."
+        )
+        return
+
+    status = await message.answer("🎧 Ovozni tinglayapman...")
+
+    try:
+        # Download Telegram voice
+        file = await bot.get_file(message.voice.file_id)
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".ogg",
+            delete=False
+        ) as audio:
+            await bot.download_file(
+                file.file_path,
+                audio.name
+            )
+            audio_path = audio.name
+
+
+        # Gemini STT + answer
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "audio/ogg",
+                                "data": audio_bytes
+                            }
+                        },
+                        {
+    "text": SYSTEM_PROMPT + """
+
+Listen to this voice message.
+Understand the language.
+Reply naturally as Qadam.
+Keep it short and friendly.
+"""
+}
+                    ]
+                }
+            ]
+        )
+
+        reply = response.text.strip()
+
+
+        # TTS
+        tts_file = tempfile.NamedTemporaryFile(
+            suffix=".mp3",
+            delete=False
+        )
+
+        communicate = edge_tts.Communicate(
+            reply,
+            voice="uz-UZ-MadinaNeural"
+        )
+
+        await communicate.save(tts_file.name)
+
+
+        await status.delete()
+
+        await message.answer_voice(
+            voice=types.FSInputFile(tts_file.name),
+            caption=reply
+        )
+
+     
+    except Exception as e:
+        log.error(f"Voice error: {e}")
+
+        await status.edit_text(
+            "🎙️ Ovozni qayta ishlashda xatolik bo'ldi."
+        )
 
 @dp.message()
 async def handle_message(message: Message):
