@@ -22,7 +22,7 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-API_URL = "https://api.deepseek.com/chat/completions"
+API_URL = "https://api.poyo.ai/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 DS_HEADERS = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
 
@@ -108,18 +108,19 @@ async def handle_message(message: Message):
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
                     "max_tokens": 500,
-                    "thinking": {"type": "disabled"},
                 },
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    reply = data["choices"][0]["message"]["content"].strip()
+                    # PoYo wraps the real OpenAI-style response inside a "data" field
+                    payload = data.get("data", data)
+                    reply = payload["choices"][0]["message"]["content"].strip()
                 elif resp.status == 503:
                     log.warning("Provider cold-starting (503)")
                     reply = "Bir soniya kut, tizim uyg'onyapti... qayta yoz iltimos."
                 else:
                     body = await resp.text()
-                    log.error(f"DeepSeek API error {resp.status}: {body}")
+                    log.error(f"PoYo API error {resp.status}: {body}")
                     reply = ERROR_MESSAGE
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         log.error(f"Request failed: {e}")
@@ -155,7 +156,7 @@ async def on_startup(app: web.Application):
 async def handle_webhook(request: web.Request):
     update = types.Update(**await request.json())
     # Ack Telegram immediately so it doesn't retry/duplicate the update
-    # while we're still waiting on the HF API call.
+    # while we're still waiting on the DeepSeek API call.
     asyncio.create_task(dp.feed_update(bot, update))
     return web.Response()
 
