@@ -376,6 +376,56 @@ async def cmd_setbonus(message: Message):
     await redis_cmd("SET", f"bonus:{target_id}", amount)
     await message.answer(f"✅ {target_id} uchun bonus {amount} ga o'rnatildi.")
 
+@dp.message(Command("voice"))
+async def cmd_voice(message: Message):
+    user_id = message.from_user.id
+
+    parts = message.text.split(maxsplit=1)
+
+    # Case 1: /voice + text
+    if len(parts) > 1:
+        text_to_voice = parts[1]
+
+    # Case 2: only /voice
+    else:
+        history = await get_memory(user_id)
+
+        assistant_messages = [
+            h["content"]
+            for h in history
+            if h["role"] == "assistant"
+        ]
+
+        if not assistant_messages:
+            await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
+            return
+
+        text_to_voice = assistant_messages[-1]
+
+
+    try:
+        tts_file = tempfile.NamedTemporaryFile(
+            suffix=".mp3",
+            delete=False
+        )
+
+        communicate = edge_tts.Communicate(
+            text_to_voice,
+            voice="uz-UZ-SardorNeural"
+        )
+
+        await communicate.save(tts_file.name)
+
+        await message.answer_voice(
+            voice=types.FSInputFile(tts_file.name)
+        )
+
+        os.remove(tts_file.name)
+
+    except Exception as e:
+        log.error(f"Voice command error: {e}")
+        await message.answer("🎙️ Ovoz yaratishda xatolik bo'ldi.")
+        
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
