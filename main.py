@@ -6,7 +6,11 @@ import json
 from datetime import date
 
 import aiohttp
-from aiogram import Bot, Dispatcher, types
+import tempfile
+import edge_tts
+
+from google import genai
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiohttp import web
@@ -34,6 +38,7 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 API_URL = "https://api.poyo.ai/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
