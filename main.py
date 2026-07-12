@@ -10,6 +10,7 @@ import tempfile
 import edge_tts
 
 from google import genai
+from google.genai import types as genai_types
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -376,6 +377,7 @@ async def cmd_setbonus(message: Message):
     await redis_cmd("SET", f"bonus:{target_id}", amount)
     await message.answer(f"✅ {target_id} uchun bonus {amount} ga o'rnatildi.")
 
+
 @dp.message(Command("voice"))
 async def cmd_voice(message: Message):
     user_id = message.from_user.id
@@ -385,49 +387,34 @@ async def cmd_voice(message: Message):
     # Case 1: /voice + text
     if len(parts) > 1:
         text_to_voice = parts[1]
-
     # Case 2: only /voice
     else:
-        last_reply = await redis_cmd(
-            "GET",
-            f"last_reply:{user_id}"
-        )
-
+        last_reply = await redis_cmd("GET", f"last_reply:{user_id}")
         if not last_reply:
             await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
             return
-
         text_to_voice = last_reply
 
     try:
-        tts_file = tempfile.NamedTemporaryFile(
-            suffix=".mp3",
-            delete=False
-        )
-
-        communicate = edge_tts.Communicate(
-            text_to_voice,
-            voice="uz-UZ-SardorNeural"
-        )
-
+        tts_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        communicate = edge_tts.Communicate(text_to_voice, voice="uz-UZ-SardorNeural")
         await communicate.save(tts_file.name)
 
-        await message.answer_voice(
-            voice=types.FSInputFile(tts_file.name)
-        )
+        await message.answer_voice(voice=types.FSInputFile(tts_file.name))
 
         os.remove(tts_file.name)
-
     except Exception as e:
         log.error(f"Voice command error: {e}")
         await message.answer("🎙️ Ovoz yaratishda xatolik bo'ldi.")
+
+
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     user_id = message.from_user.id
 
     voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
 
-        count = await redis_cmd("INCR", voice_key)
+    count = await redis_cmd("INCR", voice_key)
 
     if count is None:
         count = 1  # Redis unavailable, allow voice
@@ -444,68 +431,47 @@ async def handle_voice(message: Message):
 
     status = await message.answer("🎧 Ovozni tinglayapman...")
 
-
     try:
         # Download Telegram voice
         file = await bot.get_file(message.voice.file_id)
 
-        with tempfile.NamedTemporaryFile(
-            suffix=".ogg",
-            delete=False
-        ) as audio:
-            await bot.download_file(
-                file.file_path,
-                audio.name
-            )
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as audio:
+            await bot.download_file(file.file_path, audio.name)
             audio_path = audio.name
-
 
         # Gemini STT + answer
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()
 
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": "audio/ogg",
-                                "data": audio_bytes
-                            }
-                        },
-                        {
-    "text": SYSTEM_PROMPT + """
+        os.remove(audio_path)
+
+        voice_instructions = SYSTEM_PROMPT + """
 
 Listen to this voice message.
 Understand the language.
 Reply naturally as Qadam.
 Keep it short and friendly.
 """
-}
-                    ]
-                }
-            ]
+
+        # generate_content is a BLOCKING call in this SDK — run it in a thread
+        # so it doesn't freeze the bot's single event loop while waiting on Gemini.
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=[
+                voice_instructions,
+                genai_types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg"),
+            ],
         )
 
-        reply = response.text.strip()
-
+        reply = (response.text or "").strip()
+        if not reply:
+            raise ValueError("Empty response from Gemini")
 
         # TTS
-        tts_file = tempfile.NamedTemporaryFile(
-            suffix=".mp3",
-            delete=False
-        )
-
-        communicate = edge_tts.Communicate(
-            reply,
-            voice="uz-UZ-MadinaNeural"
-        )
-
+        tts_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        communicate = edge_tts.Communicate(reply, voice="uz-UZ-MadinaNeural")
         await communicate.save(tts_file.name)
-
 
         await status.delete()
 
@@ -514,13 +480,17 @@ Keep it short and friendly.
             caption=reply
         )
 
-     
-    except Exception as e:
-        log.error(f"Voice error: {e}")
+        os.remove(tts_file.name)
 
-        await status.edit_text(
-            "🎙️ Ovozni qayta ishlashda xatolik bo'ldi."
-        )
+        await redis_cmd("SET", f"last_reply:{user_id}", reply)
+
+    except Exception as e:
+        log.error(f"Voice error: {e}", exc_info=True)
+        try:
+            await status.edit_text("🎙️ Ovozni qayta ishlashda xatolik bo'ldi.")
+        except Exception:
+            pass
+
 
 @dp.message()
 async def handle_message(message: Message):
