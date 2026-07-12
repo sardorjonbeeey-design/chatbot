@@ -23,7 +23,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 API_URL = "https://router.huggingface.co/v1/chat/completions"
-HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"  # small, fast, free-tier friendly
+HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # stronger multilingual quality (Uzbek + English)
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
 
 SYSTEM_PROMPT = """You are Qadam — a flagship AI friend on Telegram.
@@ -153,7 +153,9 @@ async def on_startup(app: web.Application):
 
 async def handle_webhook(request: web.Request):
     update = types.Update(**await request.json())
-    await dp.feed_update(bot, update)
+    # Ack Telegram immediately so it doesn't retry/duplicate the update
+    # while we're still waiting on the HF API call.
+    asyncio.create_task(dp.feed_update(bot, update))
     return web.Response()
 
 
