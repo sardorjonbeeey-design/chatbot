@@ -429,10 +429,13 @@ async def handle_voice(message: Message):
 
     count = await redis_cmd("INCR", voice_key)
 
-    if count == 1:
-        await redis_cmd("EXPIRE", voice_key, 172800)
+if count is None:
+    count = 1  # Redis unavailable, allow voice
 
-    if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
+if int(count) == 1:
+    await redis_cmd("EXPIRE", voice_key, 172800)
+
+if int(count) > VOICE_DAILY_LIMIT and user_id not in ADMIN_IDS:
         await message.answer(
             "🎙️ Bugungi ovozli xabar limiti tugadi.\n"
             "Ertaga yana foydalanishingiz mumkin."
