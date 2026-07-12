@@ -382,7 +382,15 @@ async def handle_message(message: Message):
 
     # fire-and-forget backup — runs in parallel, doesn't block or slow down the reply
     asyncio.create_task(backup_to_channel(message))
+    if len(user_text) > 1000:
+    await message.answer(
+        "⚠️ Xabaringiz juda uzun.\n\n"
+        "Iltimos, xabaringizni 1000 belgidan kamroq qilib yuboring."
+    )
+    return
 
+history = await get_memory(user_id)
+messages = build_messages(history, user_text)
     history = await get_memory(user_id)
     messages = build_messages(history, user_text)
 
