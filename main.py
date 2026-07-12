@@ -8,6 +8,7 @@ from datetime import date
 import aiohttp
 import tempfile
 import edge_tts
+from langdetect import detect, LangDetectException
 
 from google import genai
 from google.genai import types as genai_types
@@ -425,6 +426,21 @@ async def cmd_redistest(message: Message):
     await message.answer("\n".join(lines))
 
 
+def pick_tts_voice(text: str) -> str:
+    """Picks a female TTS voice matching the text's language, so English words
+    aren't read with broken Uzbek phonetics. Defaults to Uzbek on any ambiguity."""
+    try:
+        # langdetect has no 'uz' model, so it tends to guess something else
+        # (often 'tr' or 'id') for Uzbek Latin text — only trust a confident 'en' guess.
+        lang = detect(text)
+    except LangDetectException:
+        lang = None
+
+    if lang == "en":
+        return "en-US-AriaNeural"  # English, female
+    return "uz-UZ-MadinaNeural"  # Uzbek, female
+
+
 @dp.message(Command("voice"))
 async def cmd_voice(message: Message):
     user_id = message.from_user.id
@@ -443,8 +459,9 @@ async def cmd_voice(message: Message):
         text_to_voice = last_reply
 
     try:
+        tts_voice = pick_tts_voice(text_to_voice)
         tts_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        communicate = edge_tts.Communicate(text_to_voice, voice="uz-UZ-SardorNeural")
+        communicate = edge_tts.Communicate(text_to_voice, voice=tts_voice)
         await communicate.save(tts_file.name)
 
         await message.answer_voice(voice=types.FSInputFile(tts_file.name))
