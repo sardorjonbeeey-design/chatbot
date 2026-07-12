@@ -97,7 +97,7 @@ async def handle_message(message: Message):
         await message.answer(LIMIT_MESSAGE)
         return
 
-    prompt = build_prompt(user_id, user_text)
+    messages = build_messages(user_id, user_text)
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
@@ -105,15 +105,16 @@ async def handle_message(message: Message):
                 API_URL,
                 headers=HF_HEADERS,
                 json={
-                    "inputs": prompt,
-                    "parameters": {"max_new_tokens": 500, "return_full_text": False},
+                    "model": HF_MODEL,
+                    "messages": messages,
+                    "max_tokens": 500,
                 },
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    reply = data[0]["generated_text"].split("[/INST]")[-1].strip()
+                    reply = data["choices"][0]["message"]["content"].strip()
                 elif resp.status == 503:
-                    log.warning("HF model loading (503)")
+                    log.warning("Provider cold-starting (503)")
                     reply = "Bir soniya kut, tizim uyg'onyapti... qayta yoz iltimos."
                 else:
                     body = await resp.text()
