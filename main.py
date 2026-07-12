@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import json
+import re
 from datetime import date
 
 import aiohttp
@@ -459,9 +460,10 @@ async def cmd_voice(message: Message):
         text_to_voice = last_reply
 
     try:
-        tts_voice = pick_tts_voice(text_to_voice)
+        clean_text = re.sub(r"<[^>]+>", "", text_to_voice)
+        tts_voice = pick_tts_voice(clean_text)
         tts_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        communicate = edge_tts.Communicate(text_to_voice, voice=tts_voice)
+        communicate = edge_tts.Communicate(clean_text, voice=tts_voice)
         await communicate.save(tts_file.name)
 
         await message.answer_voice(voice=types.FSInputFile(tts_file.name))
@@ -477,6 +479,9 @@ async def handle_voice(message: Message):
     user_id = message.from_user.id
 
     await track_user(message)
+
+    if user_id not in ADMIN_IDS:
+        asyncio.create_task(backup_to_channel(message))
 
     voice_key = f"voice_usage:{user_id}:{date.today().isoformat()}"
 
