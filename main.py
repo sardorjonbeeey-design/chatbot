@@ -206,6 +206,10 @@ def build_messages(history: list, user_text: str) -> list:
 
 
 ERROR_MESSAGE = "Hozir biroz band bo'lib qoldim, birpasdan keyin qayta yoz 🙏"
+LIMIT_MESSAGE = (
+    "😔 Bugungi bepul limit tugadi.\n\n"
+    "🎁 /invite orqali do'stlaringizni taklif qilib qo'shimcha xabarlar oling!"
+)
 STATUS_STAGES = [
     (0, "✍️ Javob yozyapman"),      # 0-5s: normal response time
     (5, "🤔 O'ylayapman"),          # 5-15s: model is taking longer, "thinking"
