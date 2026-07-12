@@ -376,6 +376,8 @@ async def cmd_setbonus(message: Message):
     await redis_cmd("SET", f"bonus:{target_id}", amount)
     await message.answer(f"✅ {target_id} uchun bonus {amount} ga o'rnatildi.")
 
+@dp.message(F.voice)
+async def handle_voice(...)
 
 @dp.message()
 async def handle_message(message: Message):
