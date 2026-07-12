@@ -2,3 +2,4 @@ aiogram==3.13.1
 aiohttp==3.10.5
 google-genai
 edge-tts
+langdetect
