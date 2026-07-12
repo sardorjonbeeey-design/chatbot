@@ -22,8 +22,9 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
-HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+API_URL = "https://router.huggingface.co/v1/chat/completions"
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"  # small, fast, free-tier friendly
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
 
 SYSTEM_PROMPT = """You are Qadam — a flagship AI friend on Telegram.
 
@@ -67,14 +68,12 @@ def check_and_increment_limit(user_id: int) -> bool:
     return True
 
 
-def build_prompt(user_id: int, user_text: str) -> str:
-    history = user_memory[user_id]
-    convo = ""
-    for role, text in history:
-        tag = "User" if role == "user" else "Assistant"
-        convo += f"{tag}: {text}\n"
-    convo += f"User: {user_text}"
-    return f"<s>[INST] {SYSTEM_PROMPT}\n\n{convo} [/INST]"
+def build_messages(user_id: int, user_text: str) -> list:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for role, text in user_memory[user_id]:
+        messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": user_text})
+    return messages
 
 
 LIMIT_MESSAGE = "Bugungi 30 ta xabar limitiga yetding. Ertaga davom etamiz 🙂"
