@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("qadam")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
 DAILY_LIMIT = 30
 MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
@@ -22,9 +22,9 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-API_URL = "https://router.huggingface.co/v1/chat/completions"
-HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # stronger multilingual quality (Uzbek + English)
-HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+DS_HEADERS = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
 
 SYSTEM_PROMPT = """You are Qadam — a flagship AI friend on Telegram.
 
@@ -103,11 +103,12 @@ async def handle_message(message: Message):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             async with session.post(
                 API_URL,
-                headers=HF_HEADERS,
+                headers=DS_HEADERS,
                 json={
-                    "model": HF_MODEL,
+                    "model": DEEPSEEK_MODEL,
                     "messages": messages,
                     "max_tokens": 500,
+                    "thinking": {"type": "disabled"},
                 },
             ) as resp:
                 if resp.status == 200:
@@ -118,13 +119,13 @@ async def handle_message(message: Message):
                     reply = "Bir soniya kut, tizim uyg'onyapti... qayta yoz iltimos."
                 else:
                     body = await resp.text()
-                    log.error(f"HF API error {resp.status}: {body}")
+                    log.error(f"DeepSeek API error {resp.status}: {body}")
                     reply = ERROR_MESSAGE
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         log.error(f"Request failed: {e}")
         reply = ERROR_MESSAGE
     except (KeyError, IndexError, ValueError) as e:
-        log.error(f"Unexpected HF response format: {e}")
+        log.error(f"Unexpected DeepSeek response format: {e}")
         reply = ERROR_MESSAGE
 
     # save turn to memory only on success-ish replies
