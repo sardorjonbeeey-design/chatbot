@@ -388,19 +388,16 @@ async def cmd_voice(message: Message):
 
     # Case 2: only /voice
     else:
-        history = await get_memory(user_id)
+        last_reply = await redis_cmd(
+    "GET",
+    f"last_reply:{user_id}"
+)
 
-        assistant_messages = [
-            h["content"]
-            for h in history
-            if h["role"] == "assistant"
-        ]
+if not last_reply:
+    await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
+    return
 
-        if not assistant_messages:
-            await message.answer("🎙️ Ovozga aylantirish uchun javob yo'q.")
-            return
-
-        text_to_voice = assistant_messages[-1]
+text_to_voice = last_reply
 
 
     try:
