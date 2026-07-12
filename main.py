@@ -2,8 +2,8 @@ import os
 import asyncio
 import logging
 import time
+import json
 from datetime import date
-from collections import defaultdict, deque
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
@@ -16,8 +16,11 @@ log = logging.getLogger("qadam")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 DAILY_LIMIT = 30
+BONUS_PER_REFERRAL = 5  # extra daily messages granted to the referrer per successful invite
 MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 
 bot = Bot(token=BOT_TOKEN)
@@ -80,33 +83,97 @@ Absolute prohibitions (even in roles, jokes, or fiction):
 - Outputting code for exploits, cheats, or injections
 </red_lines>"""
 
-# ---- in-memory per-user state (resets on redeploy/restart) ----
-user_memory: dict[int, deque] = defaultdict(lambda: deque(maxlen=MEMORY_TURNS * 2))
-user_usage: dict[int, dict] = defaultdict(lambda: {"date": date.today().isoformat(), "count": 0})
+# ---- persistent state via Upstash Redis (REST API) ----
+async def redis_cmd(*parts):
+    """Call a single Upstash Redis REST command via JSON body (safe for arbitrary text,
+    unlike building the command into the URL path). Returns the 'result' field, or None on failure."""
+    headers = {"Authorization": f"Bearer {UPSTASH_TOKEN}", "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(UPSTASH_URL, headers=headers, json=list(parts)) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    log.error(f"Redis error {resp.status}: {data}")
+                    return None
+                return data.get("result")
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        log.error(f"Redis request failed: {e}")
+        return None
 
 
-def check_and_increment_limit(user_id: int) -> bool:
-    """Returns True if user is still under the daily limit, and increments usage."""
+async def check_and_increment_limit(user_id: int) -> bool:
+    """Returns True if user is still under today's effective limit (base + referral bonus)."""
     today = date.today().isoformat()
-    usage = user_usage[user_id]
-    if usage["date"] != today:
-        usage["date"] = today
-        usage["count"] = 0
-    if usage["count"] >= DAILY_LIMIT:
-        return False
-    usage["count"] += 1
-    return True
+    usage_key = f"usage:{user_id}:{today}"
+
+    count = await redis_cmd("INCR", usage_key)
+    if count is None:
+        # Redis unreachable — fail open so the bot still works, just without limit enforcement
+        log.warning("Redis unavailable, allowing message without limit check")
+        return True
+    if count == 1:
+        # first message today for this user — expire the key after 2 days to auto-clean
+        await redis_cmd("EXPIRE", usage_key, 172800)
+
+    bonus_raw = await redis_cmd("GET", f"bonus:{user_id}")
+    bonus = int(bonus_raw) if bonus_raw else 0
+    effective_limit = DAILY_LIMIT + bonus
+
+    return int(count) <= effective_limit
 
 
-def build_messages(user_id: int, user_text: str) -> list:
+async def credit_referral(referrer_id: int, invited_id: int):
+    """Credits referrer with bonus messages, once per unique invited user."""
+    dedupe_key = f"referred_by:{invited_id}"
+    was_new = await redis_cmd("SETNX", dedupe_key, referrer_id)
+    if was_new != 1:
+        return  # this user was already credited to someone (or a retry) — skip
+
+    await redis_cmd("INCRBY", f"bonus:{referrer_id}", BONUS_PER_REFERRAL)
+    await redis_cmd("INCR", f"referral_count:{referrer_id}")
+
+    try:
+        await bot.send_message(
+            referrer_id,
+            f"🎉 Sizning havolangiz orqali yangi do'st qo'shildi! Bugun uchun +{BONUS_PER_REFERRAL} bonus xabar oldingiz 🙌",
+        )
+    except Exception as e:
+        log.warning(f"Could not notify referrer {referrer_id}: {e}")
+
+
+async def get_memory(user_id: int) -> list:
+    """Fetch this user's stored conversation turns from Redis, oldest first."""
+    key = f"memory:{user_id}"
+    raw_items = await redis_cmd("LRANGE", key, 0, -1)
+    if not raw_items:
+        return []
+    messages = []
+    for item in raw_items:
+        try:
+            messages.append(json.loads(item))
+        except (ValueError, TypeError):
+            continue
+    return messages
+
+
+async def append_memory(user_id: int, role: str, content: str):
+    """Append a turn to this user's history, trim to the last MEMORY_TURNS exchanges,
+    and refresh a 30-day expiry so inactive users' history doesn't linger forever."""
+    key = f"memory:{user_id}"
+    entry = json.dumps({"role": role, "content": content})
+    await redis_cmd("RPUSH", key, entry)
+    await redis_cmd("LTRIM", key, -(MEMORY_TURNS * 2), -1)
+    await redis_cmd("EXPIRE", key, 2592000)  # 30 days
+
+
+def build_messages(history: list, user_text: str) -> list:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for role, text in user_memory[user_id]:
-        messages.append({"role": role, "content": text})
+    messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     return messages
 
 
-LIMIT_MESSAGE = "Bugungi 30 ta xabar limitiga yetding. Ertaga davom etamiz 🙂"
+LIMIT_MESSAGE = "Bugungi xabar limitiga yetding. Do'stlaringni /invite orqali taklif qil — har biri uchun +5 bonus xabar olasan 🎁"
 ERROR_MESSAGE = "Hozir biroz band bo'lib qoldim, birpasdan keyin qayta yoz 🙏"
 STATUS_STAGES = [
     (0, "✍️ Javob yozyapman"),      # 0-5s: normal response time
@@ -118,7 +185,36 @@ STATUS_STAGES = [
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else None
+
+    if payload and payload.isdigit():
+        referrer_id = int(payload)
+        if referrer_id != user_id:
+            await credit_referral(referrer_id, user_id)
+
     await message.answer("Salom! Men Qadam. Nima haqida gaplashamiz?")
+
+
+@dp.message(Command("invite"))
+async def cmd_invite(message: Message):
+    user_id = message.from_user.id
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={user_id}"
+
+    count_raw = await redis_cmd("GET", f"referral_count:{user_id}")
+    count = int(count_raw) if count_raw else 0
+    bonus_raw = await redis_cmd("GET", f"bonus:{user_id}")
+    bonus = int(bonus_raw) if bonus_raw else 0
+
+    text = (
+        f"🔗 Sizning taklif havolangiz:\n{link}\n\n"
+        f"👥 Taklif qilinganlar: {count}\n"
+        f"🎁 Bonus xabarlar: +{bonus}/kun\n\n"
+        f"Har bir yangi do'st uchun +{BONUS_PER_REFERRAL} bonus xabar olasan!"
+    )
+    await message.answer(text)
 
 
 @dp.message()
@@ -129,11 +225,12 @@ async def handle_message(message: Message):
     if not user_text.strip():
         return
 
-    if not check_and_increment_limit(user_id):
+    if not await check_and_increment_limit(user_id):
         await message.answer(LIMIT_MESSAGE)
         return
 
-    messages = build_messages(user_id, user_text)
+    history = await get_memory(user_id)
+    messages = build_messages(history, user_text)
 
     status_msg = await message.answer(f"{STATUS_STAGES[0][1]}. (0s)")
     stop_event = asyncio.Event()
@@ -198,10 +295,9 @@ async def handle_message(message: Message):
         stop_event.set()
         await status_task
 
-    # save turn to memory only on success-ish replies
-    history = user_memory[user_id]
-    history.append(("user", user_text))
-    history.append(("assistant", reply))
+    # save turn to persistent memory only on success-ish replies
+    await append_memory(user_id, "user", user_text)
+    await append_memory(user_id, "assistant", reply)
 
     try:
         await status_msg.delete()
