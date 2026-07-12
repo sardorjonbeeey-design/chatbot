@@ -29,6 +29,7 @@ UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 BACKUP_CHANNEL_ID = os.getenv("BACKUP_CHANNEL_ID")  # e.g. -1001234567890, optional
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().lstrip("-").isdigit()}
 PORT = int(os.getenv("PORT", 10000))
+log.info(f"Loaded ADMIN_IDS: {ADMIN_IDS or '(empty — no admin commands will work)'}")
 # Daily limits
 
 DAILY_LIMIT = 30
@@ -289,9 +290,18 @@ async def cmd_invite(message: Message):
     await message.answer(text)
 
 
+def is_admin(message: Message) -> bool:
+    """Checks admin access and always logs the caller's ID — visible in Render logs —
+    so it's easy to find your own Telegram ID to put in ADMIN_IDS."""
+    uid = message.from_user.id
+    allowed = uid in ADMIN_IDS
+    log.info(f"Admin command '{message.text}' from user_id={uid} — allowed={allowed}")
+    return allowed
+
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message):
         return
     await message.answer(
         "🛠 Admin buyruqlari:\n"
@@ -304,7 +314,7 @@ async def cmd_admin(message: Message):
 
 @dp.message(Command("users"))
 async def cmd_users(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message):
         return
     ids = await redis_cmd("SMEMBERS", "known_users")
     if not ids:
@@ -325,7 +335,7 @@ async def cmd_users(message: Message):
 
 @dp.message(Command("usage"))
 async def cmd_usage(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message):
         return
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
@@ -349,7 +359,7 @@ async def cmd_usage(message: Message):
 
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2 or not parts[1].strip().isdigit():
@@ -367,7 +377,7 @@ async def cmd_history(message: Message):
 
 @dp.message(Command("setbonus"))
 async def cmd_setbonus(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message):
         return
     parts = message.text.split()
     if len(parts) != 3 or not parts[1].isdigit() or not parts[2].lstrip("-").isdigit():
@@ -448,8 +458,8 @@ async def handle_voice(message: Message):
         voice_instructions = SYSTEM_PROMPT + """
 
 Listen to this voice message.
-Understand the language.
-Reply naturally as Qadam.
+Understand the language the user is speaking.
+Reply naturally as Qadam, IN TEXT, in the same language the user spoke.
 Keep it short and friendly.
 """
 
@@ -468,21 +478,23 @@ Keep it short and friendly.
         if not reply:
             raise ValueError("Empty response from Gemini")
 
-        # TTS
-        tts_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        communicate = edge_tts.Communicate(reply, voice="uz-UZ-MadinaNeural")
-        await communicate.save(tts_file.name)
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
-        await status.delete()
-
-        await message.answer_voice(
-            voice=types.FSInputFile(tts_file.name),
-            caption=reply
-        )
-
-        os.remove(tts_file.name)
+        # Text-only reply — no TTS here. Use /voice to convert it to speech on demand.
+        try:
+            await message.answer(reply, parse_mode="HTML")
+        except Exception:
+            await message.answer(reply)
 
         await redis_cmd("SET", f"last_reply:{user_id}", reply)
+
+        # Keep voice turns in the same memory as text turns, so context carries over.
+        # We don't have the transcript of what the user said, so store a placeholder.
+        await append_memory(user_id, "user", "[ovozli xabar]")
+        await append_memory(user_id, "assistant", reply)
 
     except Exception as e:
         log.error(f"Voice error: {e}", exc_info=True)
