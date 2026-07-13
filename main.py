@@ -34,7 +34,7 @@ PORT = int(os.getenv("PORT", 10000))
 log.info(f"Loaded ADMIN_IDS: {ADMIN_IDS or '(empty — no admin commands will work)'}")
 # Daily limits
 
-DAILY_LIMIT = 30
+DAILY_LIMIT = 20
 
 VOICE_DAILY_LIMIT = int(os.getenv("VOICE_DAILY_LIMIT", 5))
 BONUS_PER_REFERRAL = 5  # extra daily messages granted to the referrer per successful invite
