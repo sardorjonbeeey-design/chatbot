@@ -23,7 +23,14 @@ log = logging.getLogger("qadam.downloader")
 COBALT_API_URL = os.getenv("COBALT_API_URL")  # e.g. https://qadam-cobalt.onrender.com
 
 LINK_PATTERN = re.compile(
-    r"(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|instagram\.com|instagr\.am)",
+    r"(youtube\.com|youtu\.be|m\.youtube\.com|music\.youtube\.com|"
+    r"tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|"
+    r"instagram\.com|instagr\.am|"
+    r"x\.com|twitter\.com|"
+    r"reddit\.com|"
+    r"soundcloud\.com|"
+    r"vimeo\.com|"
+    r"pinterest\.com)",
     re.IGNORECASE,
 )
 
