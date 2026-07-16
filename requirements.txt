@@ -3,3 +3,13 @@ aiohttp==3.10.5
 google-genai
 edge-tts
 langdetect
+
+# Document support
+pypdf
+python-docx
+python-pptx
+openpyxl
+pandas
+
+# Optional (recommended)
+python-multipart
