@@ -48,7 +48,13 @@ async def resolve_link(url: str) -> dict | None:
 
     endpoint = COBALT_API_URL.rstrip("/") + "/"
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    body = {"url": url, "videoQuality": "1080", "downloadMode": "auto"}
+    body = {
+    "url": url,
+    "videoQuality": "1080",
+    "downloadMode": "auto",
+    "youtubeVideoCodec": "h264",
+    "youtubeDubLang": "en",
+}
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
