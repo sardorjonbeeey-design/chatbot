@@ -112,7 +112,7 @@ Never force jokes.
 
 Default response length:
 
-• 1–3 sentences.
+• 1–5 sentences.
 
 Expand only if:
 
