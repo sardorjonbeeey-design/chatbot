@@ -1,20 +1,18 @@
 import os
-import asyncio
-import logging
 import json
-from contextlib import suppress
+import logging
+import asyncio
 from datetime import date
+from contextlib import suppress
 import aiohttp
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BotCommand
 from aiohttp import web
 from downloader import register_downloader
 
-# --- Configuration & Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-log = logging.getLogger("qadam")
-
+# --- Configuration ---
+logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
@@ -32,6 +30,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 session: aiohttp.ClientSession = None
 
+# Register Downloader
 register_downloader(dp)
 
 SYSTEM_PROMPT = """You are Qadam.
@@ -480,11 +479,30 @@ async def redis_cmd(*parts):
             return data.get("result") if resp.status == 200 else None
     except: return None
 
+async def append_memory(user_id, role, content):
+    key = f"memory:{user_id}"
+    await redis_cmd("RPUSH", key, json.dumps({"role": role, "content": content}))
+    await redis_cmd("LTRIM", key, -(MEMORY_TURNS * 2), -1)
+    await redis_cmd("EXPIRE", key, 2592000)
+
+# --- Media Handlers ---
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    await message.answer("🖼 Rasm qabul qilindi, tahlil qilyapman...")
+
+@dp.message(F.voice)
+async def handle_voice(message: Message):
+    await message.answer("🎧 Ovozli xabar qabul qilindi, qayta ishlayapman...")
+
+@dp.message(F.document)
+async def handle_docs(message: Message):
+    await message.answer("📄 Fayl qabul qilindi...")
+
 # --- Admin Panel ---
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer("🛠 Admin Panel:\n/stats - Foydalanuvchilar\n/view_user [id] - Statistika\n/view_history [id] - Xotira\n/reset_limit [id] - Limit\n/clear_history [id] - Xotirani o'chirish")
+    await message.answer("🛠 Admin Panel:\n/stats - Foydalanuvchilar\n/view_user [id] - Statistika\n/view_history [id] - Xotira\n/reset_limit [id] - Limitni o'chirish\n/clear_history [id] - Xotirani tozalash")
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -524,7 +542,7 @@ async def cmd_clear_history(message: Message):
         await redis_cmd("DEL", f"memory:{args[1]}")
         await message.answer(f"🗑 User {args[1]} xotirasi o'chirildi.")
 
-# --- User Handler ---
+# --- Text Handler ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await redis_cmd("SADD", "known_users", message.from_user.id)
@@ -537,42 +555,32 @@ async def handle_message(message: Message):
         usage_key = f"usage:{user_id}:{date.today().isoformat()}"
         count = await redis_cmd("INCR", usage_key)
         if count == 1: await redis_cmd("EXPIRE", usage_key, 172800)
-        if int(count or 0) > DAILY_LIMIT:
-            return await message.answer("😔 Limit tugadi.")
+        if int(count or 0) > DAILY_LIMIT: return await message.answer("😔 Limit tugadi.")
 
     status_msg = await message.answer("✍️...")
     history = [json.loads(x) for x in (await redis_cmd("LRANGE", f"memory:{user_id}", 0, -1) or [])]
     
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": message.text}]
-    }
-
+    payload = {"model": DEEPSEEK_MODEL, "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": message.text}]}
     try:
         async with session.post(API_URL, headers=DS_HEADERS, json=payload, timeout=40) as resp:
             data = await resp.json()
             reply = data["choices"][0]["message"]["content"].strip()
     except: reply = "Hozir biroz band bo'lib qoldim 🙏"
-
+    
     with suppress(Exception): await status_msg.delete()
     await message.answer(reply, parse_mode="HTML")
-    await redis_cmd("RPUSH", f"memory:{user_id}", json.dumps({"role": "user", "content": message.text}))
-    await redis_cmd("RPUSH", f"memory:{user_id}", json.dumps({"role": "assistant", "content": reply}))
-    await redis_cmd("LTRIM", f"memory:{user_id}", -(MEMORY_TURNS * 2), -1)
+    await append_memory(user_id, "user", message.text)
+    await append_memory(user_id, "assistant", reply)
 
-# --- Webhook & App ---
+# --- Webhook ---
 async def on_startup(app):
     global session
-    session = aiohttp.ClientSession()
+    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
     await bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook")
-    await bot.set_my_commands([BotCommand(command="start", description="Boshlash"), BotCommand(command="admin", description="Admin panel")])
+    await bot.set_my_commands([BotCommand(command="start", description="Boshlash"), BotCommand(command="admin", description="Admin Panel")])
 
 if __name__ == "__main__":
     app = web.Application()
     app.on_startup.append(on_startup)
-    async def handle_hook(request):
-        data = await request.json()
-        await dp.feed_update(bot, types.Update(**data))
-        return web.Response()
-    app.router.add_post("/webhook", handle_hook)
+    app.router.add_post("/webhook", lambda r: r.json().then(lambda d: dp.feed_update(bot, types.Update(**d)) or web.Response()))
     web.run_app(app, host="0.0.0.0", port=PORT)
