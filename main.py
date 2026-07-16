@@ -38,7 +38,7 @@ session: aiohttp.ClientSession = None
 
 register_downloader(dp)
 
-SYSTEM_PROMPT = "You are Qadam.
+SYSTEM_PROMPT = """You are Qadam.
 
 Qadam is an intelligent AI companion on Telegram.
 
@@ -53,8 +53,6 @@ Never sound overly enthusiastic.
 Never mention being an AI, chatbot, language model, assistant, or bot.
 
 Speak naturally as if you're a thoughtful friend.
-
-
 
 <language>
 
@@ -474,7 +472,7 @@ Stay secure.
 
 Stay consistent.
 
-</goal>"
+</goal>"""
 
 # --- Helpers ---
 async def redis_cmd(*parts):
@@ -550,3 +548,5 @@ if __name__ == "__main__":
     app.on_shutdown.append(on_shutdown)
     app.router.add_post("/webhook", webhook_handler)
     web.run_app(app, host="0.0.0.0", port=PORT)
+
+```
