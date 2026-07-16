@@ -17,6 +17,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiohttp import web
+from downloader import register_downloader
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("qadam")
@@ -43,6 +44,7 @@ MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+register_downloader(dp)
 
 API_URL = "https://api.poyo.ai/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
