@@ -261,3 +261,4 @@ def register_downloader(dp: Dispatcher):
                 "Havola vaqtinchalik amal qiladi."
             )
             await message.answer(text, reply_markup=keyboard)
+"""
