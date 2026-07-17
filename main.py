@@ -4,12 +4,17 @@ import logging
 import time
 import json
 import re
+import io
 from datetime import date
+from typing import Optional
 
 import aiohttp
 import tempfile
 import edge_tts
 from langdetect import detect, LangDetectException
+from pypdf import PdfReader
+from docx import Document as DocxDocument
+from openpyxl import load_workbook
 
 from google import genai
 from google.genai import types as genai_types
@@ -27,6 +32,7 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 # Gemini (used ONLY for voice messages)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")  # optional — powers web search (free tier: 1000/mo)
 UPSTASH_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 BACKUP_CHANNEL_ID = os.getenv("BACKUP_CHANNEL_ID")  # e.g. -1001234567890, optional
@@ -40,6 +46,8 @@ DAILY_LIMIT = 20
 VOICE_DAILY_LIMIT = int(os.getenv("VOICE_DAILY_LIMIT", 5))
 BONUS_PER_REFERRAL = 5  # extra daily messages granted to the referrer per successful invite
 MEMORY_TURNS = 10  # last 10 user+bot exchanges kept per user
+MAX_MEDIA_BYTES = 20 * 1024 * 1024  # Telegram Bot API's own ceiling for file downloads
+MAX_FILE_TEXT_CHARS = 6000  # cap extracted document text before it goes into the prompt
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -226,6 +234,152 @@ def build_messages(history: list, user_text: str) -> list:
     return messages
 
 
+# ---- Web search (Tavily) ----
+
+TAVILY_URL = "https://api.tavily.com/search"
+
+# Words that suggest the user wants current/live info, in Uzbek, English, and Russian —
+# used to auto-trigger a background search before answering, so the bot can ground its
+# reply in fresh results without the user needing to ask for a search explicitly.
+SEARCH_TRIGGER_PATTERN = re.compile(
+    r"\b(bugun|hozir|so'nggi|songi|yangilik|narxi|kursi|kim g'olib|natija|"
+    r"latest|today|now|current|news|price|score|who won|"
+    r"сегодня|сейчас|последн|новост|цена|курс|результат)\b",
+    re.IGNORECASE,
+)
+
+
+async def tavily_search(query: str, max_results: int = 5) -> Optional[str]:
+    """Runs a Tavily web search and returns a compact text block for the LLM prompt.
+    Returns None if Tavily isn't configured or the search fails — callers should treat
+    that as 'no grounding available' and continue without it, never as a hard error."""
+    if not TAVILY_API_KEY:
+        return None
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {TAVILY_API_KEY}"}
+    body = {"query": query, "max_results": max_results, "search_depth": "basic", "include_answer": True}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.post(TAVILY_URL, headers=headers, json=body) as resp:
+                if resp.status != 200:
+                    log.warning(f"Tavily search failed ({resp.status}) for query: {query!r}")
+                    return None
+                data = await resp.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        log.warning(f"Tavily request failed: {e}")
+        return None
+
+    parts = []
+    if data.get("answer"):
+        parts.append(f"Summary: {data['answer']}")
+    for r in data.get("results", [])[:max_results]:
+        title = r.get("title", "")
+        content = (r.get("content") or "")[:400]
+        url = r.get("url", "")
+        parts.append(f"- {title}: {content} ({url})")
+
+    return "\n".join(parts) if parts else None
+
+
+async def build_messages_with_search(history: list, user_text: str) -> list:
+    """Same as build_messages, but if the message looks like it needs current info,
+    runs a Tavily search first and injects the results as extra grounding context."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+
+    if SEARCH_TRIGGER_PATTERN.search(user_text):
+        results_text = await tavily_search(user_text)
+        if results_text:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Live web search results relevant to the user's next message "
+                    "(use if helpful, ignore if not, never mention that you searched):\n"
+                    f"{results_text}"
+                ),
+            })
+
+    messages.append({"role": "user", "content": user_text})
+    return messages
+
+
+async def ask_deepseek(messages: list) -> str:
+    """Shared DeepSeek/PoYo call — used by normal chat, /search, and document Q&A so the
+    request/response/error-handling logic exists in exactly one place."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(
+                API_URL,
+                headers=DS_HEADERS,
+                json={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": messages,
+                    "max_tokens": 300,
+                    "thinking": {"type": "disabled"},
+                },
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # PoYo wraps the real OpenAI-style response inside a "data" field
+                    payload = data.get("data", data)
+                    return payload["choices"][0]["message"]["content"].strip()
+                elif resp.status == 503:
+                    log.warning("Provider cold-starting (503)")
+                    return "Bir soniya kut, tizim uyg'onyapti... qayta yoz iltimos."
+                else:
+                    body = await resp.text()
+                    log.error(f"PoYo API error {resp.status}: {body}")
+                    return ERROR_MESSAGE
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        log.error(f"Request failed: {e}")
+        return ERROR_MESSAGE
+    except (KeyError, IndexError, ValueError) as e:
+        log.error(f"Unexpected DeepSeek response format: {e}")
+        return ERROR_MESSAGE
+
+
+# ---- Document text extraction (PDF / DOCX / XLSX / TXT) ----
+
+def extract_pdf_text(file_bytes: bytes) -> str:
+    reader = PdfReader(io.BytesIO(file_bytes))
+    text_parts = [page.extract_text() or "" for page in reader.pages[:30]]  # cap pages
+    return "\n".join(text_parts).strip()
+
+
+def extract_docx_text(file_bytes: bytes) -> str:
+    doc = DocxDocument(io.BytesIO(file_bytes))
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
+def extract_xlsx_text(file_bytes: bytes) -> str:
+    wb = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    lines = []
+    for sheet in wb.worksheets[:5]:  # cap sheets
+        lines.append(f"[{sheet.title}]")
+        for row in sheet.iter_rows(max_row=200, values_only=True):  # cap rows
+            if any(cell is not None for cell in row):
+                lines.append(", ".join("" if c is None else str(c) for c in row))
+    return "\n".join(lines)
+
+
+def extract_document_text(file_bytes: bytes, filename: str) -> Optional[str]:
+    """Returns extracted text for a supported file type, or None if extraction fails
+    or the type isn't one we handle (caller should have already filtered by extension)."""
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    try:
+        if ext == "pdf":
+            return extract_pdf_text(file_bytes)
+        if ext == "docx":
+            return extract_docx_text(file_bytes)
+        if ext in ("xlsx", "xlsm"):
+            return extract_xlsx_text(file_bytes)
+        if ext == "txt":
+            return file_bytes.decode("utf-8", errors="ignore")
+    except Exception as e:
+        log.error(f"Failed to extract text from .{ext} file: {e}")
+        return None
+    return None
+
+
 ERROR_MESSAGE = "Hozir biroz band bo'lib qoldim, birpasdan keyin qayta yoz 🙏"
 LIMIT_MESSAGE = (
     "😔 Bugungi bepul limit tugadi.\n\n"
@@ -272,13 +426,15 @@ async def cmd_help(message: Message):
     await message.answer(
         "<b>QADAM</b>\n"
         "<i>Sun'iy intellekt hamrohingiz</i>\n\n"
-        "Matn yoz, ovozli xabar yubor yoki rasm tashla — qolganini men bajaraman.\n\n"
+        "Matn yoz, ovozli xabar yubor, rasm yoki fayl tashla — qolganini men bajaraman.\n\n"
         "○ <b>Matn</b> — istalgan mavzuda suhbat\n"
-        "○ <b>Ovoz</b> — tinglayman, javob beraman\n"
-        "○ <b>Rasm</b> — ko'raman, tushuntiraman\n\n"
+        "○ <b>Ovoz</b> — tinglayman, javob beraman (o'zbek, rus, ingliz)\n"
+        "○ <b>Rasm</b> — ko'raman, tushuntiraman\n"
+        "○ <b>Fayl</b> — PDF, DOCX, XLSX, TXT o'qiyman va tahlil qilaman\n\n"
         "· · ·\n\n"
         "/invite — do'st taklif qil, +5 bonus xabar ol\n"
-        "/voice — oxirgi javobni ovozga aylantir\n\n"
+        "/voice — oxirgi javobni ovozga aylantir\n"
+        "/search <so'rov> — internetdan qidirib javob beraman\n\n"
         "Kunlik bepul limit mavjud. Tugasa — /invite orqali kengaytiring.",
         parse_mode="HTML",
     )
@@ -431,17 +587,19 @@ async def cmd_redistest(message: Message):
 
 
 def pick_tts_voice(text: str) -> str:
-    """Picks a female TTS voice matching the text's language, so English words
-    aren't read with broken Uzbek phonetics. Defaults to Uzbek on any ambiguity."""
+    """Picks a female TTS voice matching the text's language (Uzbek/Russian/English),
+    so words aren't read with the wrong phonetics. Defaults to Uzbek on any ambiguity."""
     try:
         # langdetect has no 'uz' model, so it tends to guess something else
-        # (often 'tr' or 'id') for Uzbek Latin text — only trust a confident 'en' guess.
+        # (often 'tr' or 'id') for Uzbek Latin text — only trust confident 'en'/'ru' guesses.
         lang = detect(text)
     except LangDetectException:
         lang = None
 
     if lang == "en":
         return "en-US-AriaNeural"  # English, female
+    if lang == "ru":
+        return "ru-RU-SvetlanaNeural"  # Russian, female
     return "uz-UZ-MadinaNeural"  # Uzbek, female
 
 
@@ -475,6 +633,63 @@ async def cmd_voice(message: Message):
     except Exception as e:
         log.error(f"Voice command error: {e}")
         await message.answer("🎙️ Ovoz yaratishda xatolik bo'ldi.")
+
+
+@dp.message(Command("search"))
+async def cmd_search(message: Message):
+    user_id = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Foydalanish: /search <so'rov>\nMasalan: /search bugungi dollar kursi")
+        return
+
+    if not TAVILY_API_KEY:
+        await message.answer("🔎 Qidiruv xizmati hozircha sozlanmagan.")
+        return
+
+    if user_id not in ADMIN_IDS:
+        if not await check_and_increment_limit(user_id):
+            await message.answer(LIMIT_MESSAGE)
+            return
+
+    query = parts[1].strip()
+    status = await message.answer("🔎 Internetdan qidiryapman...")
+
+    results_text = await tavily_search(query)
+    if not results_text:
+        try:
+            await status.edit_text("😕 Qidiruv natija bermadi. Boshqacha so'rov bilan urinib ko'ring.")
+        except Exception:
+            pass
+        return
+
+    try:
+        await status.edit_text("✍️ Javob yozyapman...")
+    except Exception:
+        pass
+
+    search_prompt = (
+        f'Web search results for "{query}":\n{results_text}\n\n'
+        "Using these results, answer the user's query naturally and concisely, in their "
+        "language. Summarize in your own words — never quote verbatim."
+    )
+    history = await get_memory(user_id)
+    messages = build_messages(history, search_prompt)
+    reply = await ask_deepseek(messages)
+
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+    try:
+        await message.answer(reply, parse_mode="HTML")
+    except Exception:
+        await message.answer(reply)
+
+    await redis_cmd("SET", f"last_reply:{user_id}", reply)
+    await append_memory(user_id, "user", f"[qidiruv: {query}]")
+    await append_memory(user_id, "assistant", reply)
 
 
 @dp.message(F.voice)
@@ -642,6 +857,99 @@ Reply naturally as Qadam, IN TEXT, in the same language as the user's caption
             pass
 
 
+SUPPORTED_DOC_EXTENSIONS = ("pdf", "docx", "xlsx", "xlsm", "txt")
+
+
+@dp.message(F.document)
+async def handle_document(message: Message):
+    user_id = message.from_user.id
+
+    await track_user(message)
+    asyncio.create_task(backup_to_channel(message))
+
+    doc = message.document
+    filename = doc.file_name or "file"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+    if ext not in SUPPORTED_DOC_EXTENSIONS:
+        await message.answer("📄 Hozircha faqat PDF, DOCX, XLSX va TXT fayllarni o'qiy olaman.")
+        return
+
+    if doc.file_size and doc.file_size > MAX_MEDIA_BYTES:
+        await message.answer("📄 Fayl juda katta — qayta urinib ko'ring.")
+        return
+
+    if user_id not in ADMIN_IDS:
+        if not await check_and_increment_limit(user_id):
+            await message.answer(LIMIT_MESSAGE)
+            return
+
+    status = await message.answer("📄 Faylni o'qiyapman...")
+
+    try:
+        file = await bot.get_file(doc.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
+            tmp_path = tmp.name
+        await bot.download_file(file.file_path, tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            file_bytes = f.read()
+        os.remove(tmp_path)
+
+        text = extract_document_text(file_bytes, filename)
+        if not text or not text.strip():
+            try:
+                await status.edit_text(
+                    "📄 Fayldan matn chiqarib bo'lmadi — bo'sh yoki skanerlangan bo'lishi mumkin."
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            await status.edit_text("🤔 Tahlil qilyapman...")
+        except Exception:
+            pass
+
+        truncated = text[:MAX_FILE_TEXT_CHARS]
+        caption = (message.caption or "").strip()
+        user_note = caption if caption else "Ushbu faylni umumiy tarzda tahlil qilib, asosiy mazmunini tushuntiring."
+
+        doc_prompt = (
+            f'[Foydalanuvchi "{filename}" faylini yubordi. Fayldan olingan matn:]\n'
+            f"---\n{truncated}\n---\n"
+            f"[Foydalanuvchi so'rovi]: {user_note}\n\n"
+            "Yuqoridagi fayl matni asosida javob ber."
+        )
+        history = await get_memory(user_id)
+        messages = build_messages(history, doc_prompt)
+        reply = await ask_deepseek(messages)
+
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+        try:
+            await message.answer(reply, parse_mode="HTML")
+        except Exception:
+            await message.answer(reply)
+
+        await redis_cmd("SET", f"last_reply:{user_id}", reply)
+
+        memory_note = f"[fayl: {filename}] {caption}" if caption else f"[fayl: {filename}]"
+        await append_memory(user_id, "user", memory_note)
+        await append_memory(user_id, "assistant", reply)
+
+    except Exception as e:
+        log.error(f"Document error: {e}", exc_info=True)
+        try:
+            await status.edit_text("📄 Faylni qayta ishlashda xatolik bo'ldi.")
+        except Exception:
+            pass
+
+
 @dp.message()
 async def handle_message(message: Message):
     user_id = message.from_user.id
@@ -668,7 +976,7 @@ async def handle_message(message: Message):
         return
 
     history = await get_memory(user_id)
-    messages = build_messages(history, user_text)
+    messages = await build_messages_with_search(history, user_text)
 
     status_msg = await message.answer(f"{STATUS_STAGES[0][1]}. (0s)")
     stop_event = asyncio.Event()
@@ -700,35 +1008,7 @@ async def handle_message(message: Message):
     status_task = asyncio.create_task(animate_status())
 
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            async with session.post(
-                API_URL,
-                headers=DS_HEADERS,
-                json={
-                    "model": DEEPSEEK_MODEL,
-                    "messages": messages,
-                    "max_tokens": 300,
-                    "thinking": {"type": "disabled"},
-                },
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    # PoYo wraps the real OpenAI-style response inside a "data" field
-                    payload = data.get("data", data)
-                    reply = payload["choices"][0]["message"]["content"].strip()
-                elif resp.status == 503:
-                    log.warning("Provider cold-starting (503)")
-                    reply = "Bir soniya kut, tizim uyg'onyapti... qayta yoz iltimos."
-                else:
-                    body = await resp.text()
-                    log.error(f"PoYo API error {resp.status}: {body}")
-                    reply = ERROR_MESSAGE
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        log.error(f"Request failed: {e}")
-        reply = ERROR_MESSAGE
-    except (KeyError, IndexError, ValueError) as e:
-        log.error(f"Unexpected DeepSeek response format: {e}")
-        reply = ERROR_MESSAGE
+        reply = await ask_deepseek(messages)
     finally:
         stop_event.set()
         await status_task
