@@ -20,7 +20,7 @@ from google import genai
 from google.genai import types as genai_types
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from aiohttp import web
 from downloader import register_downloader
 
@@ -385,12 +385,97 @@ LIMIT_MESSAGE = (
     "😔 Bugungi bepul limit tugadi.\n\n"
     "🎁 /invite orqali do'stlaringizni taklif qilib qo'shimcha xabarlar oling!"
 )
-STATUS_STAGES = [
-    (0, "✍️ Javob yozyapman"),      # 0-5s: normal response time
-    (5, "🤔 O'ylayapman"),          # 5-15s: model is taking longer, "thinking"
-    (15, "⏳ Navbatda kutyapman"),   # 15-30s: likely queued on the provider side
-    (30, "💭 Sabr qiling, tugayapti"),  # 30s+: reassurance for the rare long wait
-]
+
+# One shared vocabulary of actions used across every handler (chat, voice, photo, files,
+# search) so the bot's status messages read as one consistent product, not a different
+# style per feature. Rendered inside <blockquote> — Telegram has no true "colored text",
+# but a blockquote gives status messages a distinct boxed/quoted look versus normal replies.
+ACTION_LABELS = {
+    "writing": "✍️ Yozyapman",
+    "thinking": "🧠 O'ylayapman",
+    "listening": "🎧 Tinglayapman",
+    "checking": "🔎 Tekshiryapman",
+    "reading": "📖 O'qiyapman",
+    "searching": "🌐 Qidiryapman",
+    "downloading": "⬇️ Yuklab olyapman",
+    "uploading": "⬆️ Yuklayapman",
+    "queued": "⏳ Navbatda kutyapman",
+    "waiting": "💭 Sabr qiling, tugayapti",
+}
+
+# (elapsed_seconds_threshold, action_key) — stage plans per handler, all sharing the
+# same ACTION_LABELS vocabulary above.
+CHAT_STATUS_STAGES = [(0, "writing"), (5, "thinking"), (15, "queued"), (30, "waiting")]
+VOICE_STATUS_STAGES = [(0, "listening"), (3, "thinking")]
+PHOTO_STATUS_STAGES = [(0, "checking"), (3, "thinking")]
+DOC_STATUS_STAGES = [(0, "reading"), (2, "thinking")]
+SEARCH_QUERY_STAGES = [(0, "searching")]
+SEARCH_WRITE_STAGES = [(0, "writing")]
+
+
+def render_status(action_key: str, dots: str, elapsed: int) -> str:
+    label = ACTION_LABELS.get(action_key, action_key)
+    return f"<blockquote>{label}{dots} · {elapsed}s</blockquote>"
+
+
+async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = None) -> None:
+    """Edits a message's text, swallowing 'message not modified' / rate-limit errors."""
+    try:
+        await msg.edit_text(text, parse_mode=parse_mode)
+    except Exception:
+        pass
+
+
+async def safe_delete(msg: Message) -> None:
+    """Deletes a message, swallowing 'already deleted' / permission errors."""
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def run_status_animation(status_msg: Message, stages: list, stop_event: asyncio.Event) -> None:
+    """Animates a status message through a sequence of branded action stages. `stages` is
+    a list of (elapsed_seconds_threshold, action_key) tuples in ascending order. Skips
+    redundant edits when the text hasn't changed, and throttles the tick rate once we're
+    past 30s so a rare long wait doesn't hammer Telegram's edit-rate limit."""
+    start = time.monotonic()
+    dot_count = 0
+    last_text: Optional[str] = None
+
+    while not stop_event.is_set():
+        elapsed = int(time.monotonic() - start)
+        action_key = stages[0][1]
+        for threshold, key in stages:
+            if elapsed >= threshold:
+                action_key = key
+        dots = "." * ((dot_count % 3) + 1)
+        text = render_status(action_key, dots, elapsed)
+
+        if text != last_text:
+            await safe_edit(status_msg, text, parse_mode="HTML")
+            last_text = text
+        dot_count += 1
+
+        tick = 3.0 if elapsed >= 30 else 1.2
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=tick)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def stop_status_animation(stop_event: asyncio.Event, status_task: asyncio.Task) -> None:
+    stop_event.set()
+    await status_task
+
+
+async def start_status(message: Message, stages: list) -> tuple:
+    """Sends the initial status message and starts its background animation task.
+    Returns (status_msg, stop_event, status_task) for the caller to stop later."""
+    status_msg = await message.answer(render_status(stages[0][1], ".", 0), parse_mode="HTML")
+    stop_event = asyncio.Event()
+    status_task = asyncio.create_task(run_status_animation(status_msg, stages, stop_event))
+    return status_msg, stop_event, status_task
 
 
 @dp.message(Command("start"))
@@ -407,7 +492,7 @@ async def cmd_start(message: Message):
 
     await message.answer(
         "Salom! Men Qadam. Nima haqida gaplashamiz?\n\n"
-        "ℹ️ Buyruqlarni bilish uchun /help yoz."
+        "ℹ️ Imkoniyatlarni ko'rish uchun /help yoz yoki pastdagi Menu tugmasidan foydalan."
     )
 
 
@@ -423,21 +508,41 @@ async def get_invite_link_and_stats(user_id: int):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔗 Taklif havolam", callback_data="show_invite")]]
+    )
     await message.answer(
         "<b>QADAM</b>\n"
         "<i>Sun'iy intellekt hamrohingiz</i>\n\n"
-        "Matn yoz, ovozli xabar yubor, rasm yoki fayl tashla — qolganini men bajaraman.\n\n"
-        "○ <b>Matn</b> — istalgan mavzuda suhbat\n"
-        "○ <b>Ovoz</b> — tinglayman, javob beraman (o'zbek, rus, ingliz)\n"
-        "○ <b>Rasm</b> — ko'raman, tushuntiraman\n"
-        "○ <b>Fayl</b> — PDF, DOCX, XLSX, TXT o'qiyman va tahlil qilaman\n\n"
+        "<b>Nima qila olaman</b>\n\n"
+        "💬  <b>Matn</b> — istalgan mavzuda suhbat, xotira bilan\n"
+        "🎙  <b>Ovoz</b> — tinglayman va gapiraman · o'zbek, rus, ingliz\n"
+        "🖼  <b>Rasm</b> — ko'raman va sharhlayman\n"
+        "📄  <b>Fayl</b> — PDF, DOCX, XLSX, TXT o'qiyman va tahlil qilaman\n"
+        "🔍  <b>Qidiruv</b> — internetdan real vaqtda ma'lumot topaman\n"
+        "⬇️  <b>Havola</b> — TikTok, Instagram, YouTube va boshqalarni yuklab beraman\n\n"
         "· · ·\n\n"
-        "/invite — do'st taklif qil, +5 bonus xabar ol\n"
-        "/voice — oxirgi javobni ovozga aylantir\n"
-        "/search <so'rov> — internetdan qidirib javob beraman\n\n"
+        "<b>Buyruqlar</b>\n"
+        "/invite — do'st taklif qil, +5 bonus xabar\n"
+        "/voice [matn] — ovozga aylantirish\n"
+        "/search so'rov — internetdan qidirish\n\n"
         "Kunlik bepul limit mavjud. Tugasa — /invite orqali kengaytiring.",
         parse_mode="HTML",
+        reply_markup=keyboard,
     )
+
+
+@dp.callback_query(F.data == "show_invite")
+async def cb_show_invite(callback: CallbackQuery):
+    link, count, bonus = await get_invite_link_and_stats(callback.from_user.id)
+    text = (
+        f"🔗 Sizning taklif havolangiz:\n{link}\n\n"
+        f"👥 Taklif qilinganlar: {count}\n"
+        f"🎁 Bonus xabarlar: +{bonus}/kun\n\n"
+        f"Har bir yangi do'st uchun +{BONUS_PER_REFERRAL} bonus xabar olasan!"
+    )
+    await callback.message.answer(text)
+    await callback.answer()
 
 
 @dp.message(Command("invite"))
@@ -653,20 +758,18 @@ async def cmd_search(message: Message):
             return
 
     query = parts[1].strip()
-    status = await message.answer("🔎 Internetdan qidiryapman...")
+    status, stop_event, status_task = await start_status(message, SEARCH_QUERY_STAGES)
 
     results_text = await tavily_search(query)
     if not results_text:
-        try:
-            await status.edit_text("😕 Qidiruv natija bermadi. Boshqacha so'rov bilan urinib ko'ring.")
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_edit(status, "😕 Qidiruv natija bermadi. Boshqacha so'rov bilan urinib ko'ring.")
         return
 
-    try:
-        await status.edit_text("✍️ Javob yozyapman...")
-    except Exception:
-        pass
+    # switch the same status message into the "writing" phase for the DeepSeek call
+    await stop_status_animation(stop_event, status_task)
+    stop_event = asyncio.Event()
+    status_task = asyncio.create_task(run_status_animation(status, SEARCH_WRITE_STAGES, stop_event))
 
     search_prompt = (
         f'Web search results for "{query}":\n{results_text}\n\n'
@@ -677,10 +780,8 @@ async def cmd_search(message: Message):
     messages = build_messages(history, search_prompt)
     reply = await ask_deepseek(messages)
 
-    try:
-        await status.delete()
-    except Exception:
-        pass
+    await stop_status_animation(stop_event, status_task)
+    await safe_delete(status)
 
     try:
         await message.answer(reply, parse_mode="HTML")
@@ -716,7 +817,7 @@ async def handle_voice(message: Message):
         )
         return
 
-    status = await message.answer("🎧 Ovozni tinglayapman...")
+    status, stop_event, status_task = await start_status(message, VOICE_STATUS_STAGES)
 
     try:
         # Download Telegram voice
@@ -755,10 +856,8 @@ Keep it short and friendly.
         if not reply:
             raise ValueError("Empty response from Gemini")
 
-        try:
-            await status.delete()
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_delete(status)
 
         # Text-only reply — no TTS here. Use /voice to convert it to speech on demand.
         try:
@@ -775,10 +874,8 @@ Keep it short and friendly.
 
     except Exception as e:
         log.error(f"Voice error: {e}", exc_info=True)
-        try:
-            await status.edit_text("🎙️ Ovozni qayta ishlashda xatolik bo'ldi.")
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_edit(status, "🎙️ Ovozni qayta ishlashda xatolik bo'ldi.")
 
 
 @dp.message(F.photo)
@@ -793,7 +890,7 @@ async def handle_photo(message: Message):
             await message.answer(LIMIT_MESSAGE)
             return
 
-    status = await message.answer("🖼️ Rasmni ko'ryapman...")
+    status, stop_event, status_task = await start_status(message, PHOTO_STATUS_STAGES)
 
     try:
         # Telegram sends several resolutions of the same photo — take the largest
@@ -833,10 +930,8 @@ Reply naturally as Qadam, IN TEXT, in the same language as the user's caption
         if not reply:
             raise ValueError("Empty response from Gemini")
 
-        try:
-            await status.delete()
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_delete(status)
 
         try:
             await message.answer(reply, parse_mode="HTML")
@@ -851,10 +946,8 @@ Reply naturally as Qadam, IN TEXT, in the same language as the user's caption
 
     except Exception as e:
         log.error(f"Photo error: {e}", exc_info=True)
-        try:
-            await status.edit_text("🖼️ Rasmni qayta ishlashda xatolik bo'ldi.")
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_edit(status, "🖼️ Rasmni qayta ishlashda xatolik bo'ldi.")
 
 
 SUPPORTED_DOC_EXTENSIONS = ("pdf", "docx", "xlsx", "xlsm", "txt")
@@ -884,7 +977,7 @@ async def handle_document(message: Message):
             await message.answer(LIMIT_MESSAGE)
             return
 
-    status = await message.answer("📄 Faylni o'qiyapman...")
+    status, stop_event, status_task = await start_status(message, DOC_STATUS_STAGES)
 
     try:
         file = await bot.get_file(doc.file_id)
@@ -899,18 +992,9 @@ async def handle_document(message: Message):
 
         text = extract_document_text(file_bytes, filename)
         if not text or not text.strip():
-            try:
-                await status.edit_text(
-                    "📄 Fayldan matn chiqarib bo'lmadi — bo'sh yoki skanerlangan bo'lishi mumkin."
-                )
-            except Exception:
-                pass
+            await stop_status_animation(stop_event, status_task)
+            await safe_edit(status, "📄 Fayldan matn chiqarib bo'lmadi — bo'sh yoki skanerlangan bo'lishi mumkin.")
             return
-
-        try:
-            await status.edit_text("🤔 Tahlil qilyapman...")
-        except Exception:
-            pass
 
         truncated = text[:MAX_FILE_TEXT_CHARS]
         caption = (message.caption or "").strip()
@@ -926,10 +1010,8 @@ async def handle_document(message: Message):
         messages = build_messages(history, doc_prompt)
         reply = await ask_deepseek(messages)
 
-        try:
-            await status.delete()
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_delete(status)
 
         try:
             await message.answer(reply, parse_mode="HTML")
@@ -944,10 +1026,8 @@ async def handle_document(message: Message):
 
     except Exception as e:
         log.error(f"Document error: {e}", exc_info=True)
-        try:
-            await status.edit_text("📄 Faylni qayta ishlashda xatolik bo'ldi.")
-        except Exception:
-            pass
+        await stop_status_animation(stop_event, status_task)
+        await safe_edit(status, "📄 Faylni qayta ishlashda xatolik bo'ldi.")
 
 
 @dp.message()
@@ -978,49 +1058,18 @@ async def handle_message(message: Message):
     history = await get_memory(user_id)
     messages = await build_messages_with_search(history, user_text)
 
-    status_msg = await message.answer(f"{STATUS_STAGES[0][1]}. (0s)")
-    stop_event = asyncio.Event()
-
-    def stage_for(elapsed: int) -> str:
-        current = STATUS_STAGES[0][1]
-        for threshold, label in STATUS_STAGES:
-            if elapsed >= threshold:
-                current = label
-        return current
-
-    async def animate_status():
-        start = time.monotonic()
-        dot_count = 0
-        while not stop_event.is_set():
-            elapsed = int(time.monotonic() - start)
-            stage = stage_for(elapsed)
-            dots = "." * ((dot_count % 3) + 1)
-            try:
-                await status_msg.edit_text(f"{stage}{dots} ({elapsed}s)")
-            except Exception:
-                pass  # ignore "message not modified" / rate-limit hiccups
-            dot_count += 1
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=1.2)
-            except asyncio.TimeoutError:
-                pass
-
-    status_task = asyncio.create_task(animate_status())
+    status_msg, stop_event, status_task = await start_status(message, CHAT_STATUS_STAGES)
 
     try:
         reply = await ask_deepseek(messages)
     finally:
-        stop_event.set()
-        await status_task
+        await stop_status_animation(stop_event, status_task)
 
     # save turn to persistent memory only on success-ish replies
     await append_memory(user_id, "user", user_text)
     await append_memory(user_id, "assistant", reply)
 
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
+    await safe_delete(status_msg)
 
     try:
         await message.answer(reply, parse_mode="HTML")
@@ -1055,6 +1104,14 @@ async def on_startup(app: web.Application):
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/webhook"
     await bot.set_webhook(webhook_url)
     log.info(f"Webhook set to {webhook_url}")
+
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Botni ishga tushirish"),
+        BotCommand(command="help", description="Imkoniyatlar ro'yxati"),
+        BotCommand(command="invite", description="Do'st taklif qilib bonus olish"),
+        BotCommand(command="voice", description="Matnni ovozga aylantirish"),
+        BotCommand(command="search", description="Internetdan qidirish"),
+    ])
 
 
 async def handle_webhook(request: web.Request):
