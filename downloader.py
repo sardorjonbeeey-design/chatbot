@@ -60,10 +60,21 @@ TIMEOUT_MESSAGE = "⏳ Server javob berishga ancha vaqt oldi. Birozdan keyin qay
 OFFLINE_MESSAGE = "🚫 Yuklab olish xizmati hozircha ishlamayapti. Birozdan keyin qayta urinib ko'ring."
 INVALID_RESPONSE_MESSAGE = "😕 Kutilmagan javob keldi. Qayta urinib ko'ring."
 
-DOWNLOAD_STAGES = [
-    (0, "🔎 Qidirilmoqda"),
-    (2, "⬇️ Yuklanmoqda"),
-]
+# Same blockquote-styled action vocabulary used across the whole bot (see main.py) —
+# duplicated here in miniature since this file is intentionally self-contained and
+# doesn't import from main.py. Telegram has no true "colored text"; <blockquote> is the
+# closest thing to a distinct "system status" look available in its HTML parse mode.
+ACTION_LABELS = {
+    "checking": "🔎 Tekshiryapman",
+    "downloading": "⬇️ Yuklab olyapman",
+    "uploading": "⬆️ Yuklayapman",
+}
+DOWNLOAD_STAGES = [(0, "checking"), (2, "downloading")]
+
+
+def render_status(action_key: str, dots: str) -> str:
+    label = ACTION_LABELS.get(action_key, action_key)
+    return f"<blockquote>{label}{dots}</blockquote>"
 
 
 def contains_supported_link(message: Message) -> bool:
@@ -151,9 +162,9 @@ async def safe_delete(msg: Message):
         pass
 
 
-async def safe_edit(msg: Message, text: str):
+async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = None):
     try:
-        await msg.edit_text(text)
+        await msg.edit_text(text, parse_mode=parse_mode)
     except Exception:
         pass
 
@@ -190,14 +201,14 @@ def register_downloader(dp: Dispatcher):
             return
         source_url = url_match.group(0)
 
-        status_msg = await message.answer(f"{DOWNLOAD_STAGES[0][1]}...")
+        status_msg = await message.answer(render_status(DOWNLOAD_STAGES[0][1], "."), parse_mode="HTML")
         stop_event = asyncio.Event()
 
         def stage_for(elapsed: int) -> str:
             current = DOWNLOAD_STAGES[0][1]
-            for threshold, label in DOWNLOAD_STAGES:
+            for threshold, key in DOWNLOAD_STAGES:
                 if elapsed >= threshold:
-                    current = label
+                    current = key
             return current
 
         async def animate_status():
@@ -207,7 +218,7 @@ def register_downloader(dp: Dispatcher):
                 elapsed = int(time.monotonic() - start)
                 stage = stage_for(elapsed)
                 dots = "." * ((dot_count % 3) + 1)
-                await safe_edit(status_msg, f"{stage}{dots}")
+                await safe_edit(status_msg, render_status(stage, dots), parse_mode="HTML")
                 dot_count += 1
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=1.2)
@@ -246,11 +257,11 @@ def register_downloader(dp: Dispatcher):
             await safe_edit(status_msg, error_message_for_code(code))
             return
 
-        await safe_edit(status_msg, "✅ Topildi!")
-        await asyncio.sleep(0.5)
-        await safe_delete(status_msg)
+        await safe_edit(status_msg, render_status("uploading", "..."), parse_mode="HTML")
 
         sent = await send_result(message, link, note, source_url)
+        await safe_delete(status_msg)
+
         if not sent:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔗 Havola", url=link)]]
